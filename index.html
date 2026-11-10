@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cat Clicker</title>
+  <!-- Tailwind CSS via CDN (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* ── CSS Keyframes ─────────────────────────────────────────────── */
+
+    /* Petting animation: wobble + scale pulse, completes in ≤400ms */
+    @keyframes petting {
+      0%   { transform: scale(1) rotate(0deg); }
+      20%  { transform: scale(1.3) rotate(-8deg); }
+      40%  { transform: scale(1.3) rotate(8deg); }
+      60%  { transform: scale(1.2) rotate(-5deg); }
+      80%  { transform: scale(1.1) rotate(3deg); }
+      100% { transform: scale(1) rotate(0deg); }
+    }
+
+    /* Float-up animation: moves up ≥40px and fades out in 1000ms */
+    @keyframes float-up {
+      0%   { transform: translateY(0); opacity: 1; }
+      100% { transform: translateY(-60px); opacity: 0; }
+    }
+
+    /* Flash animation: full-page opacity flash, 1000ms */
+    @keyframes flash {
+      0%   { opacity: 0; }
+      20%  { opacity: 0.6; }
+      100% { opacity: 0; }
+    }
+
+    /* Sparkle animation: star-like scale pulses, 1200ms */
+    @keyframes sparkle {
+      0%   { transform: scale(0) rotate(0deg); opacity: 1; }
+      50%  { transform: scale(1.5) rotate(180deg); opacity: 0.8; }
+      100% { transform: scale(0) rotate(360deg); opacity: 0; }
+    }
+
+    /* Confetti animation: coloured squares fall, 1200ms */
+    @keyframes confetti {
+      0%   { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+      100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+    }
+
+    /* Floating text spans spawned by JS (Requirement 3.1, 3.2) */
+    .floating-text {
+      position: fixed;
+      pointer-events: none;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #7c3aed;
+      white-space: nowrap;
+      animation: float-up 1000ms ease-out forwards;
+      z-index: 100;
+    }
+
+    /* Burst overlay elements spawned by JS (Requirement 6.3) */
+    .burst-overlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 200;
+    }
+
+    /* Cat element: cursor + focus ring */
+    #cat {
+      cursor: pointer;
+      font-size: clamp(48px, 10vw, 96px); /* min 48px (Requirement 1.1) */
+      line-height: 1;
+      display: inline-block;
+      transition: outline 0.1s;
+    }
+
+    #cat:focus {
+      outline: 3px solid #6366f1; /* indigo-500 — ≥2px, high contrast */
+      outline-offset: 4px;
+      border-radius: 8px;
+    }
+
+    /* Apply petting animation class */
+    #cat.petting {
+      animation: petting 400ms ease-in-out forwards;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-amber-50 text-gray-900 flex flex-col items-center justify-center p-4 overflow-x-hidden">
+
+  <!-- Main container: centres cat + counter vertically and horizontally (Requirement 7.4) -->
+  <main class="flex flex-col items-center justify-center gap-6 w-full max-w-lg mx-auto text-center">
+
+    <!-- Cat element -->
+    <div
+      id="cat"
+      tabindex="0"
+      role="button"
+      aria-label="Pet the cat"
+      class="select-none"
+    >😺</div>
+
+    <!-- Instructional label — visible until first pet in session (Requirements 1.3, 1.4) -->
+    <p id="instruction-label" class="text-base text-gray-500" aria-live="polite">Click to pet!</p>
+
+    <!-- Pet counter display (Requirements 4.1, 4.3, 4.4) -->
+    <p id="counter-display" class="text-xl font-semibold text-gray-800" aria-live="polite" aria-atomic="true">Pets given: 0</p>
+
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // ── Storage module ───────────────────────────────────────────────
+      // Thin wrapper around localStorage. All calls are wrapped in
+      // try/catch so SecurityError or QuotaExceededError degrade gracefully.
+      // Keys: "cat_pet_count" (number), "cat_milestones" (number[])
+      const Storage = {
+        /**
+         * Reads the value stored under `key` from localStorage.
+         * Parses the JSON string and returns the parsed value.
+         * Returns null on any error (key missing, JSON parse failure,
+         * SecurityError, or any other exception).
+         *
+         * @param {string} key
+         * @returns {*} parsed value or null
+         */
+        get(key) {
+          try {
+            const raw = localStorage.getItem(key);
+            if (raw === null) return null;
+            return JSON.parse(raw);
+          } catch (_err) {
+            return null;
+          }
+        },
+
+        /**
+         * Serialises `value` to JSON and writes it to localStorage under `key`.
+         * Silently ignores SecurityError, QuotaExceededError, and any other
+         * exceptions so the app continues operating without persistence when
+         * localStorage is unavailable.
+         *
+         * @param {string} key
+         * @param {*} value
+         */
+        set(key, value) {
+          try {
+            localStorage.setItem(key, JSON.stringify(value));
+          } catch (_err) {
+            // Silently ignore SecurityError, QuotaExceededError, etc.
+          }
+        },
+      };
+
+      // ── State module ────────────────────────────────────────────────
+      // Single source-of-truth for the application state.
+      // Mutated only through the helpers below — never directly.
+
+      /** All milestone values the app recognises (Requirement 6.1) */
+      const MILESTONES = [10, 25, 50, 100, 250, 500, 1000];
+
+      /** Internal state object — private to the IIFE */
+      const state = {
+        petCount: 0,             // integer, 0 – 999,999,999
+        triggeredMilestones: [], // subset of MILESTONES already fired
+      };
+
+      /**
+       * Reads persisted values from Storage and populates `state`.
+       *
+       * Validation rules (Requirements 5.1, 5.4):
+       *  - cat_pet_count must be an integer in [0, 999,999,999];
+       *    anything else → reset to 0 and overwrite in Storage.
+       *  - cat_milestones must be an array whose every element is a
+       *    value present in MILESTONES; otherwise → reset to [] and
+       *    overwrite in Storage.
+       */
+      function initState() {
+        // ── Restore pet count ──────────────────────────────────────
+        const storedCount = Storage.get('cat_pet_count');
+        const isValidCount =
+          typeof storedCount === 'number' &&
+          Number.isInteger(storedCount) &&
+          storedCount >= 0 &&
+          storedCount <= 999_999_999;
+
+        if (isValidCount) {
+          state.petCount = storedCount;
+        } else {
+          state.petCount = 0;
+          Storage.set('cat_pet_count', 0);
+        }
+
+        // ── Restore triggered milestones ───────────────────────────
+        const storedMilestones = Storage.get('cat_milestones');
+        const isValidMilestones =
+          Array.isArray(storedMilestones) &&
+          storedMilestones.every(
+            (m) => typeof m === 'number' && MILESTONES.includes(m)
+          );
+
+        if (isValidMilestones) {
+          state.triggeredMilestones = storedMilestones;
+        } else {
+          state.triggeredMilestones = [];
+          Storage.set('cat_milestones', []);
+        }
+      }
+
+      /**
+       * Increments `petCount` by 1, clamped to 999,999,999.
+       * Persists the new value to Storage.
+       * Returns the new pet count (Requirements 2.1, 5.2).
+       *
+       * @returns {number} the updated pet count
+       */
+      function increment() {
+        if (state.petCount < 999_999_999) {
+          state.petCount += 1;
+        }
+        Storage.set('cat_pet_count', state.petCount);
+        return state.petCount;
+      }
+
+      /**
+       * Returns `true` if `n` is a defined milestone that has not yet
+       * been triggered in this session (Requirements 6.1, 6.4).
+       *
+       * @param {number} n
+       * @returns {boolean}
+       */
+      function isMilestone(n) {
+        return MILESTONES.includes(n) && !state.triggeredMilestones.includes(n);
+      }
+
+      /**
+       * Records `n` as a triggered milestone and persists the updated
+       * list to Storage (Requirement 6.4).
+       *
+       * @param {number} n
+       */
+      function markMilestone(n) {
+        state.triggeredMilestones.push(n);
+        Storage.set('cat_milestones', state.triggeredMilestones);
+      }
+
+      // ── Reaction module ─────────────────────────────────────────────
+      // Owns the reaction pool, the milestone-exclusive set, and the
+      // selection logic. No DOM references — pure data + logic only.
+
+      /**
+       * @typedef {{ text: string, catImage: string|null }} ReactionRecord
+       */
+
+      const Reaction = {
+        /**
+         * Standard reaction pool — ≥15 entries, ≥5 with a non-null catImage.
+         * No text value may overlap with milestoneSet (enforced by assertion below).
+         * Requirements 2.3, 3.3, 3.5
+         */
+        pool: [
+          { text: 'purrrr~',       catImage: '😸' },   // 1 — catImage
+          { text: 'uwu',           catImage: '🥰' },   // 2 — catImage
+          { text: '( =ω= )',       catImage: '😺' },   // 3 — catImage
+          { text: ':3',            catImage: '😻' },   // 4 — catImage
+          { text: '*kneads paws*', catImage: '🐱' },   // 5 — catImage
+          { text: 'mrrrow~',       catImage: null  },
+          { text: 'head bump!',    catImage: null  },
+          { text: 'slow blink ♥', catImage: null  },
+          { text: 'trills softly', catImage: null  },
+          { text: 'flops over',    catImage: null  },
+          { text: 'chirp!',        catImage: null  },
+          { text: 'mew.',          catImage: null  },
+          { text: 'prrrrt~',       catImage: null  },
+          { text: '( ^._.^ )ﾉ',   catImage: null  },
+          { text: 'zzZZzz…',      catImage: null  },
+        ],
+
+        /**
+         * Milestone-exclusive reaction set — ≥7 entries (one per milestone value).
+         * No text value may appear in pool (enforced by assertion below).
+         * Requirements 6.1, 6.2
+         */
+        milestoneSet: [
+          { text: '🎉 10 pets! You\'re amazing!',       catImage: '😹' }, // milestone 10
+          { text: '✨ 25 and counting! Superstar!',      catImage: '🙀' }, // milestone 25
+          { text: '🔥 50 pets! On fire!',                catImage: '😾' }, // milestone 50
+          { text: '💯 100 pets! Legendary petter!',      catImage: '😼' }, // milestone 100
+          { text: '🌟 250 pets! Petting god!',           catImage: '😽' }, // milestone 250
+          { text: '🏆 500 pets! Hall of Fame!',          catImage: '🐈' }, // milestone 500
+          { text: '🚀 1000 pets! Absolutely unhinged!',  catImage: '🐈‍⬛' }, // milestone 1000
+        ],
+
+        /**
+         * Returns a ReactionRecord selected uniformly at random from the
+         * appropriate set.
+         *
+         * @param {boolean} isMilestone - when true, selects from milestoneSet;
+         *                                otherwise selects from pool.
+         * @returns {ReactionRecord|null} - null when the relevant array is empty
+         *                                  (Requirements 2.5).
+         */
+        select(isMilestone) {
+          const source = isMilestone ? this.milestoneSet : this.pool;
+          if (source.length === 0) return null;
+          const index = Math.floor(Math.random() * source.length);
+          return source[index];
+        },
+      };
+
+      // Startup assertion: pool and milestoneSet must share zero text values.
+      // This is a developer-facing guard; it throws during development if the
+      // arrays are accidentally misconfigured. (Requirements 6.2)
+      (function assertReactionExclusivity() {
+        const poolTexts = new Set(Reaction.pool.map((r) => r.text));
+        for (const r of Reaction.milestoneSet) {
+          if (poolTexts.has(r.text)) {
+            throw new Error(
+              `[cat-clicker] Reaction exclusivity violated: "${r.text}" appears in both pool and milestoneSet.`
+            );
+          }
+        }
+      })();
+
+      // ── Animation module ────────────────────────────────────────────
+      // Handles all timed visual effects. Each function is independent
+      // and non-blocking — it creates/modifies DOM elements and uses CSS
+      // animations driven by keyframes declared in <head>.
+      // No other module calls Animation; only UI does.
+
+      const Animation = {
+        /**
+         * Restarts the petting CSS animation on `el` even if it is already
+         * playing, by removing the class, forcing a reflow, then re-adding it.
+         * Total animation duration is ≤400 ms (Requirements 2.2, 2.4).
+         *
+         * @param {HTMLElement} el - the cat element
+         */
+        playPettingAnimation(el) {
+          // Remove class to reset the animation timeline
+          el.classList.remove('petting');
+          // Force a reflow so the browser registers the removal before
+          // we re-add the class — otherwise consecutive clicks have no effect.
+          // Reading offsetWidth is the lightest way to trigger layout.
+          void el.offsetWidth;
+          el.classList.add('petting');
+        },
+
+        /**
+         * Creates a floating text <span>, positions it horizontally centred
+         * on `anchorEl` and at or above its top edge, appends it to <body>,
+         * then auto-removes it after 1000 ms. Each call is fully independent
+         * and does not affect previous or future spans (Requirements 3.1, 3.2, 3.4).
+         *
+         * @param {string}      text      - the reaction text to display
+         * @param {HTMLElement} anchorEl  - the element to position relative to
+         */
+        spawnFloatingText(text, anchorEl) {
+          const span = document.createElement('span');
+          span.className = 'floating-text';
+          span.textContent = text;
+
+          // Temporarily append off-screen so we can measure its width
+          span.style.visibility = 'hidden';
+          document.body.appendChild(span);
+
+          const rect = anchorEl.getBoundingClientRect();
+          const spanWidth = span.offsetWidth;
+
+          // Position using fixed coordinates to avoid any offset-parent surprises.
+          // The .floating-text CSS class also declares position:fixed to match.
+          span.style.position = 'fixed';
+          // Horizontally centre the span over the anchor element
+          const left = rect.left + rect.width / 2 - spanWidth / 2;
+          // Place the span at the top edge of the anchor (or above)
+          const top = rect.top - 8; // 8 px clearance above the cat
+
+          span.style.left = `${left}px`;
+          span.style.top = `${top}px`;
+          span.style.visibility = ''; // restore visibility
+
+          // Auto-remove after the float-up animation completes (1000 ms)
+          setTimeout(() => {
+            span.remove();
+          }, 1000);
+        },
+
+        /**
+         * Injects a full-page overlay element and plays the requested burst
+         * animation for 800–1500 ms, then removes the element.
+         * `type` must be one of: 'confetti', 'sparkle', 'flash' (Requirement 6.3).
+         *
+         * @param {'confetti'|'sparkle'|'flash'} type
+         */
+        playBurstAnimation(type) {
+          // Duration map: each type maps to its CSS animation duration in ms
+          const durationMap = {
+            flash:    1000,
+            sparkle:  1200,
+            confetti: 1200,
+          };
+
+          const duration = durationMap[type] ?? 1000;
+
+          if (type === 'confetti') {
+            // For confetti, spawn several coloured square pieces
+            const colours = ['#f87171', '#fbbf24', '#34d399', '#60a5fa', '#a78bfa', '#f472b6'];
+            const pieceCount = 30;
+
+            for (let i = 0; i < pieceCount; i++) {
+              const piece = document.createElement('div');
+              piece.className = 'burst-overlay';
+              // Override inset to position each piece at a random horizontal position
+              const startX = Math.random() * 100; // vw percentage
+              piece.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: ${startX}vw;
+                width: 10px;
+                height: 10px;
+                background: ${colours[i % colours.length]};
+                border-radius: 2px;
+                pointer-events: none;
+                z-index: 200;
+                animation: confetti ${duration}ms ease-in ${Math.random() * 300}ms forwards;
+              `;
+              document.body.appendChild(piece);
+              setTimeout(() => piece.remove(), duration + 350); // +delay headroom
+            }
+          } else if (type === 'sparkle') {
+            // Spawn several star-shaped sparkle dots at random positions
+            const starSymbols = ['✦', '✧', '★', '✶', '✸'];
+            const starCount = 12;
+
+            for (let i = 0; i < starCount; i++) {
+              const star = document.createElement('span');
+              star.className = 'burst-overlay';
+              const x = 10 + Math.random() * 80; // keep within 10–90 vw
+              const y = 10 + Math.random() * 80; // keep within 10–90 vh
+              star.style.cssText = `
+                position: fixed;
+                left: ${x}vw;
+                top: ${y}vh;
+                font-size: ${1 + Math.random() * 1.5}rem;
+                color: #fbbf24;
+                pointer-events: none;
+                z-index: 200;
+                animation: sparkle ${duration}ms ease-out ${Math.random() * 200}ms forwards;
+              `;
+              star.textContent = starSymbols[i % starSymbols.length];
+              document.body.appendChild(star);
+              setTimeout(() => star.remove(), duration + 250);
+            }
+          } else {
+            // Default: flash overlay
+            const overlay = document.createElement('div');
+            overlay.className = 'burst-overlay';
+            overlay.style.cssText = `
+              position: fixed;
+              inset: 0;
+              background: #fde68a;
+              pointer-events: none;
+              z-index: 200;
+              animation: flash ${duration}ms ease-out forwards;
+            `;
+            document.body.appendChild(overlay);
+            setTimeout(() => overlay.remove(), duration);
+          }
+        },
+      };
+
+      // ── UI module ───────────────────────────────────────────────────
+      // Responsible for DOM queries, rendering, and event wiring.
+      // Calls all other modules; no other module calls UI.
+
+      const UI = {
+        // DOM element references — populated in UI.init()
+        catEl: null,
+        counterEl: null,
+        labelEl: null,
+
+        // Track whether the user has petted at least once this session
+        // (controls instructional label visibility — Requirements 1.3, 1.4)
+        hasPetted: false,
+
+        // The most recent reaction; used by UI.render() to update the cat image
+        // (Requirement 3.5)
+        lastReaction: null,
+
+        /**
+         * Queries all required DOM references, calls initState(), wires event
+         * listeners, and calls UI.render() for the initial render.
+         *
+         * Event listeners wired:
+         *   - click on cat → UI.handlePet
+         *   - keydown (Enter / Space) on cat → UI.handlePet
+         *
+         * Requirements: 4.4, 8.1, 8.2
+         */
+        init() {
+          this.catEl     = document.getElementById('cat');
+          this.counterEl = document.getElementById('counter-display');
+          this.labelEl   = document.getElementById('instruction-label');
+
+          initState();
+
+          // Click handler (Requirements 2.1, 2.2, 2.3)
+          this.catEl.addEventListener('click', (e) => this.handlePet(e));
+
+          // Keyboard handler: Enter and Space only (Requirement 8.2)
+          this.catEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.keyCode === 13 || e.keyCode === 32) {
+              // Prevent Space from scrolling the page
+              e.preventDefault();
+              this.handlePet(e);
+            }
+          });
+
+          this.render();
+        },
+
+        /**
+         * Updates the counter display, cat image, and instructional label
+         * to match the current application state.
+         *
+         * - Counter format: "Pets given: <n>" (Requirements 4.1, 4.3)
+         * - Cat image: updated when lastReaction has a non-null catImage (Requirement 3.5)
+         * - Instructional label: visible until the first pet in the session (Requirements 1.3, 1.4)
+         */
+        render() {
+          // Update counter display (Requirements 4.1, 4.2, 4.3)
+          this.counterEl.textContent = `Pets given: ${state.petCount}`;
+
+          // Update cat image if the last reaction carried a non-null catImage (Requirement 3.5)
+          if (this.lastReaction !== null && this.lastReaction.catImage !== null) {
+            this.catEl.textContent = this.lastReaction.catImage;
+          }
+
+          // Show/hide instructional label (Requirements 1.3, 1.4)
+          if (this.hasPetted) {
+            this.labelEl.style.display = 'none';
+          } else {
+            this.labelEl.style.display = '';
+          }
+        },
+
+        /**
+         * Central handler for all pet events (click + keyboard).
+         *
+         * Order of operations:
+         *  1. increment() — returns new petCount
+         *  2. Check if new petCount is a milestone (before marking)
+         *  3. Select the appropriate reaction
+         *  4. Play petting animation
+         *  5. Spawn floating text (if reaction is non-null)
+         *  6. Play burst animation + mark milestone (if milestone)
+         *  7. Mark first-pet flag
+         *  8. Call render()
+         *
+         * Requirements: 2.1, 2.2, 2.3, 3.1, 4.2, 6.3, 6.4, 8.2
+         *
+         * @param {Event} e
+         */
+        handlePet(e) {
+          // 1. Increment the counter (Requirements 2.1, 5.2)
+          const newCount = increment();
+
+          // 2. Determine whether this count is a (not-yet-triggered) milestone
+          const milestone = isMilestone(newCount);
+
+          // 3. Select the reaction from the appropriate pool (Requirements 2.3, 6.2)
+          const reaction = Reaction.select(milestone);
+          this.lastReaction = reaction;
+
+          // 4. Play petting animation (Requirements 2.2, 2.4)
+          Animation.playPettingAnimation(this.catEl);
+
+          // 5. Spawn floating text if a reaction was returned (Requirements 3.1, 2.5)
+          if (reaction !== null) {
+            Animation.spawnFloatingText(reaction.text, this.catEl);
+          }
+
+          // 6. Handle milestone celebrations (Requirements 6.3, 6.4)
+          if (milestone) {
+            // Pick a burst type deterministically (cycling through the three options)
+            const burstTypes = ['confetti', 'sparkle', 'flash'];
+            const burstType  = burstTypes[MILESTONES.indexOf(newCount) % burstTypes.length];
+            Animation.playBurstAnimation(burstType);
+
+            // Record milestone so it fires only once (Requirement 6.4)
+            markMilestone(newCount);
+          }
+
+          // 7. Record that the user has petted at least once this session
+          this.hasPetted = true;
+
+          // 8. Re-render to sync UI with state (Requirements 4.1, 4.2, 4.3, 3.5)
+          this.render();
+        },
+      };
+
+      // ── Bootstrap ────────────────────────────────────────────────────
+      // The DOM is already parsed when the deferred script runs, but
+      // wrapping in DOMContentLoaded makes the code robust to any
+      // future script-placement changes.
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => UI.init());
+      } else {
+        UI.init();
+      }
+
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cat Clicker — Property-Based Test Runner</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    /* ── Header ──────────────────────────────────────────────── */
+    header {
+      max-width: 760px;
+      margin: 0 auto 2rem;
+    }
+
+    header h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    header p {
+      margin-top: 0.4rem;
+      font-size: 0.95rem;
+      color: #94a3b8;
+    }
+
+    /* ── Summary badge ───────────────────────────────────────── */
+    #summary {
+      display: inline-block;
+      margin-top: 1rem;
+      padding: 0.35rem 1rem;
+      border-radius: 999px;
+      font-size: 1rem;
+      font-weight: 600;
+      background: #1e293b;
+      color: #94a3b8;
+    }
+
+    #summary.all-pass {
+      background: #14532d;
+      color: #86efac;
+    }
+
+    #summary.some-fail {
+      background: #450a0a;
+      color: #fca5a5;
+    }
+
+    /* ── Results list ────────────────────────────────────────── */
+    #results {
+      list-style: none;
+      max-width: 760px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    #results li {
+      padding: 0.8rem 1.1rem;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      border-left: 4px solid transparent;
+    }
+
+    #results li.pass {
+      background: #0f2e1a;
+      border-left-color: #22c55e;
+      color: #bbf7d0;
+    }
+
+    #results li.fail {
+      background: #2d0e0e;
+      border-left-color: #ef4444;
+      color: #fecaca;
+    }
+
+    #results li.pending {
+      background: #1e293b;
+      border-left-color: #475569;
+      color: #94a3b8;
+    }
+
+    #results li code {
+      display: block;
+      margin-top: 0.4rem;
+      font-size: 0.8rem;
+      word-break: break-word;
+      color: #fda4af;
+      white-space: pre-wrap;
+    }
+
+    /* ── Loading spinner ─────────────────────────────────────── */
+    #loading {
+      max-width: 760px;
+      margin: 2rem auto;
+      color: #64748b;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 3px solid #334155;
+      border-top-color: #818cf8;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* ── Footer ──────────────────────────────────────────────── */
+    footer {
+      max-width: 760px;
+      margin: 2rem auto 0;
+      font-size: 0.8rem;
+      color: #475569;
+      border-top: 1px solid #1e293b;
+      padding-top: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🐱 Cat Clicker — PBT Runner</h1>
+    <p>Property-based tests using <strong>fast-check</strong>. Each property runs 100 iterations.</p>
+    <div id="summary">Running…</div>
+  </header>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    Loading fast-check and running tests…
+  </div>
+
+  <ul id="results" aria-label="Test results" aria-live="polite"></ul>
+
+  <footer>
+    Tests target the pure logic helpers extracted from <code>index.html</code>.
+    Open the browser DevTools console for detailed fast-check output.
+  </footer>
+
+  <script type="module">
+    // ── Load fast-check from CDN ──────────────────────────────────────
+    // Using the ESM build so it works with native ES modules.
+    import * as fc from 'https://cdn.jsdelivr.net/npm/fast-check/+esm';
+
+    // ── Load test suite ───────────────────────────────────────────────
+    import { runAllTests } from './test.js';
+
+    // ── Hide the loading indicator once scripts are ready ─────────────
+    document.getElementById('loading').style.display = 'none';
+
+    // ── Run all property tests ────────────────────────────────────────
+    try {
+      const allPassed = await runAllTests(fc);
+
+      // Final summary update (runAllTests also updates the DOM,
+      // but we do a belt-and-suspenders update here too)
+      const summaryEl = document.getElementById('summary');
+      if (summaryEl && !summaryEl.classList.contains('all-pass') && !summaryEl.classList.contains('some-fail')) {
+        summaryEl.textContent = allPassed ? 'All tests passed' : 'Some tests failed';
+        summaryEl.className = allPassed ? 'all-pass' : 'some-fail';
+      }
+    } catch (err) {
+      console.error('Unexpected error running tests:', err);
+      const summaryEl = document.getElementById('summary');
+      if (summaryEl) {
+        summaryEl.textContent = 'Runner error — see console';
+        summaryEl.className = 'some-fail';
+      }
+      const li = document.createElement('li');
+      li.className = 'fail';
+      li.innerHTML = `<strong>❌ Runner crashed</strong><code>${String(err)}</code>`;
+      document.getElementById('results').appendChild(li);
+    }
+  </script>
+</body>
+</html>
